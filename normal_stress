@@ -14,7 +14,7 @@ miny=-25;
 maxy=25;
 minz=-25;
 maxz=25;
-tp=200;
+tp=500;
 stp=min([abs(maxx-minx),abs(maxy-miny),abs(maxz-minz)])/tp;
 x=minx:stp:maxx;
 y=miny:stp:maxy;
@@ -28,6 +28,10 @@ points=[mx(:),my(:),mz(:)];
 %% Load 3d model for sensor
 S_sensor=stlread('sensing_unit_K1D4.stl');
 sensor = inpolyhedron(S_sensor,x,y,z);
+
+%% Extract surface groups
+S_PDMS = extractMeshSurfaces(S_sensor);
+PDMS = inpolyhedron(S_PDMS,x,y,z);
 
 %% Load 3d model for light source
 S_msource=stlread('msource.stl');
@@ -47,7 +51,7 @@ axis off
 movvar=1;
 fps=15;
 if movvar==1
-    writerObj = VideoWriter(sprintf('%s_recording.mp4',date),'MPEG-4' );
+    writerObj = VideoWriter(sprintf('%s.mp4',date),'MPEG-4' );
     writerObj.FrameRate = fps;
     open(writerObj);
 end
@@ -58,8 +62,8 @@ mu0=12.566370e-7;
 c=1/sqrt(epsilon0*mu0);
 
 %% Plot definitions
-brightness=1;  %brigthness of plot
-nt=1000; %total number os time steps
+brightness=100;  %brigthness of plot
+nt=100; %total number os time steps
 waitdisp=20; %wait to display
 
 lengthx=5e-3;  %size of the image in x axis SI
@@ -106,13 +110,14 @@ z=(zmin+dz/2:dz:zmax-dz/2);
 
 %% Permittivities
 RI0=1;  %Background refractive index
-RI_hydrogel = 1.34; %Refractive index of hydrogel
+RI_soln = 1.33334;
+RI_PDMS = 1.4; %Refractive index of hydrogel
 
 %% Objects
-RIobj = [RI_hydrogel RI_mirror];
+RIobj = [RI_soln, RI_PDMS];
 
 obj(:,:,:,1) = double(sensor);
-obj(:,:,:,2) = double(mirror);
+obj(:,:,:,2) = double(PDMS);
 
 %% Adding objects
 objs = sum(obj,4);
@@ -346,7 +351,7 @@ while ki<nt
         axis image
         set(gca,'ydir','normal')
         colormap(gca,hot)
-        %alpha(1-squeeze(sensor(:,round(sy/2),:))*0.1-squeeze(mirror(:,round(sy/2),:))*0.1)
+        alpha(1-squeeze(sensor(:,round(sy/2),:))*0.2)
         xlabel('z ($\mu$m)','Interpreter','latex')
         ylabel('x ($\mu$m)','Interpreter','latex')
         title('Intensity on x-z plane')
@@ -356,7 +361,7 @@ while ki<nt
         axis image
         set(gca,'ydir','normal')
         colormap(gca,hot)
-        %alpha(1-squeeze(sensor(round(sx/2),:,:))*0.1-squeeze(mirror(round(sx/2),:,:))*0.1)
+        alpha(1-squeeze(sensor(round(sx/2),:,:))*0.2)
         xlabel('z ($\mu$m)','Interpreter','latex')
         ylabel('y ($\mu$m)','Interpreter','latex')
         title('Intensity on y-z plane')
@@ -366,7 +371,7 @@ while ki<nt
         axis image
         set(gca,'ydir','normal' )
         colormap(gca,emkc)
-        %alpha(1-squeeze(sensor(:,round(sy/2),:))*0.1-squeeze(mirror(:,round(sy/2),:))*0.1)
+        alpha(1-squeeze(sensor(:,round(sy/2),:))*0.2)
         xlabel('z ($\mu$m)','Interpreter','latex')
         ylabel('x ($\mu$m)','Interpreter','latex')
         title('Phase on x-z plane')
@@ -376,7 +381,7 @@ while ki<nt
         axis image
         set(gca,'ydir','normal' )
         colormap(gca,emkc)
-        %alpha(1-squeeze(sensor(round(sx/2),:,:))*0.1-squeeze(mirror(round(sx/2),:,:))*0.1)
+        alpha(1-squeeze(sensor(round(sx/2),:,:))*0.2)
         xlabel('z ($\mu$m)','Interpreter','latex')
         ylabel('y ($\mu$m)','Interpreter','latex')
         title('Phase on y-z plane')
@@ -398,29 +403,107 @@ while ki<nt
     
 end
 
+% Ensure the final field state is captured for downstream analysis.
+wait(GPU1);
+GEx = ifftn(GYkdy.*fftn(GHz2) - GZkdz.*fftn(GHy2));
+GEy = ifftn(GZkdz.*fftn(GHx2) - GXkdx.*fftn(GHz2));
+GEz = ifftn(GXkdx.*fftn(GHy2) - GYkdy.*fftn(GHx2));
+
+Ex = gather(GEx);
+Ey = gather(GEy);
+Ez = gather(GEz);
+
+intensity = abs(Ex).^2 + abs(Ey).^2 + abs(Ez).^2;
+overallintensity = intensity;
+
 if movvar==1
     close(writerObj);
 end
+%% Absorbance evaluation for the sensing unit
+sensorPresence = squeeze(any(any(sensor,1),2));
 
-%% Get the exposure intensity
-exposure_intensity = overallintensity .* sensor;
+if any(sensorPresence)
+    firstSensorIdx = find(sensorPresence, 1, 'first');
+    lastSensorIdx = find(sensorPresence, 1, 'last');
 
-%% Plot Gratings
+    preIdx = max(firstSensorIdx - 1, 1);
+    postIdx = min(lastSensorIdx + 1, sz);
 
-figure;
-subplot(1,2,1);
-imagesc(z,x,squeeze(exposure_intensity(:,round(sy/2),:,:)))
-xlabel('z ($\mu$m)','Interpreter','latex')
-ylabel('x ($\mu$m)','Interpreter','latex')
-title('Exposure intensity on x-z cross-section')
-alpha(1-squeeze(sensor(:,round(sy/2),:,:))*0.1-squeeze(mirror(:,round(sy/2),:,:))*0.1)
-subplot(1,2,2);
-imagesc(z,y,squeeze(exposure_intensity(round(sx/2),:,:,:)))
-xlabel('z ($\mu$m)','Interpreter','latex')
-ylabel('y ($\mu$m)','Interpreter','latex')
-title('Exposure intensity on y-z cross-section')
-alpha(1-squeeze(sensor(round(sx/2),:,:))*0.1-squeeze(mirror(round(sx/2),:,:))*0.1)
+    sensorFootprint = squeeze(any(sensor, 3));
+    if ~any(sensorFootprint(:))
+        sensorFootprint = true(sx, sy);
+    end
 
+    footprintCount = nnz(sensorFootprint);
+
+    incidentSlice = intensity(:, :, preIdx);
+    transmittedSlice = intensity(:, :, postIdx);
+
+    incidentMean = sum(incidentSlice(sensorFootprint)) / footprintCount;
+    transmittedMean = sum(transmittedSlice(sensorFootprint)) / footprintCount;
+
+    denom = max(incidentMean, realmin);
+    transmittance = transmittedMean / denom;
+    absorbance = -log10(max(transmittance, realmin));
+
+    fprintf('Average incident intensity: %g\n', incidentMean);
+    fprintf('Average transmitted intensity: %g\n', transmittedMean);
+    fprintf('Transmittance through sensor: %g\n', transmittance);
+    fprintf('Absorbance through sensor: %g\n', absorbance);
+
+    voxelCounts = squeeze(sum(sum(sensor, 1), 2));
+    sensorIntensity = squeeze(sum(sum(intensity .* sensor, 1), 2));
+
+    intensityProfile = NaN(sz, 1);
+    validVoxels = voxelCounts > 0;
+    intensityProfile(validVoxels) = sensorIntensity(validVoxels) ./ voxelCounts(validVoxels);
+
+    absorbanceProfile = NaN(sz, 1);
+    absorbanceProfile(validVoxels) = -log10(max(intensityProfile(validVoxels) ./ denom, realmin));
+
+    absorbanceVolume = NaN(size(intensity));
+    sensorIntensityValues = intensity(sensor);
+    absorbanceValues = -log10(max(sensorIntensityValues ./ denom, realmin));
+    absorbanceVolume(sensor) = absorbanceValues;
+
+    figure;
+    validIdx = find(validVoxels);
+    plot(z(validIdx) * 1e6, absorbanceProfile(validIdx), 'LineWidth', 1.5);
+    grid on;
+    xlabel('z ($\mu$m)', 'Interpreter', 'latex');
+    ylabel('Absorbance', 'Interpreter', 'latex');
+    title('Absorbance profile through the sensing unit');
+
+    figure;
+    subplot(1, 2, 1);
+    absorbanceSliceXZ = squeeze(absorbanceVolume(:, round(sy/2), :));
+    alphaSliceXZ = squeeze(sensor(:, round(sy/2), :));
+    imagesc(z, x, absorbanceSliceXZ, 'AlphaData', alphaSliceXZ);
+    axis image;
+    set(gca, 'ydir', 'normal');
+    colormap(gca, hot);
+    colorbar;
+    xlabel('z ($\mu$m)', 'Interpreter', 'latex');
+    ylabel('x ($\mu$m)', 'Interpreter', 'latex');
+    title('Absorbance on x-z cross-section');
+
+    subplot(1, 2, 2);
+    absorbanceSliceYZ = squeeze(absorbanceVolume(round(sx/2), :, :));
+    alphaSliceYZ = squeeze(sensor(round(sx/2), :, :));
+    imagesc(z, y, absorbanceSliceYZ, 'AlphaData', alphaSliceYZ);
+    axis image;
+    set(gca, 'ydir', 'normal');
+    colormap(gca, hot);
+    colorbar;
+    xlabel('z ($\mu$m)', 'Interpreter', 'latex');
+    ylabel('y ($\mu$m)', 'Interpreter', 'latex');
+    title('Absorbance on y-z cross-section');
+else
+    warning('Sensing unit geometry is empty; absorbance cannot be evaluated.');
+    absorbance = NaN;
+    transmittance = NaN;
+    absorbanceProfile = [];
+end
 %% Save the exposure intensity for hologram reading simulation
 % FileName = sprintf('%s_exposure_intensity.mat',date);
 % save(FileName,'-mat','-v7.3','-nocompression')
