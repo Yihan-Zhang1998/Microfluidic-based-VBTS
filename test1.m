@@ -4,12 +4,17 @@ clear;
 clc;
 close all;
 date = datestr(now,'yyyymmdd_HHMMSS');
-gpuDeviceTable
-GPU1 = gpuDevice(1);
+%% GPU (optional)
+if exist('gpuDeviceCount','file') == 2 && gpuDeviceCount('available') > 0 %#ok<*IMPLC>
+    gpuDeviceTable;
+    GPU1 = gpuDevice(1);
+else
+    fprintf('No compatible GPU detected or Parallel Computing Toolbox unavailable. Running on CPU.\n');
+end
 %% Import image for hologram recording
-msource = imresize(imread('msource.png'),1);
-sensor = imresize(imread('sensing_unit_K1D4.png'),1);
-pdms = imresize(imread('PDMS.png'),1);
+msource = readOrGenerateMask('msource.png');
+sensor = readOrGenerateMask('sensing_unit_K1D4.png');
+pdms = readOrGenerateMask('PDMS.png');
 %% Initialize video
 movvar=1;
 fps=30;
@@ -47,9 +52,9 @@ y=flip((ymin+dx/2:dy:ymax-dy/2));
 source=round(double(msource(:,:,1))/255);
 %% Refractive Indices and Objects Definition
 obj1 = sensor;
-obj1 = round(double(obj1(:,:,2))/255);
+obj1 = round(double(obj1(:,:,2))/255) > 0;
 obj2 = pdms;
-obj2 = round(double(obj2(:,:,1))/255);
+obj2 = round(double(obj2(:,:,1))/255) > 0;
 RI0 = 1.0003;  % Background refractive index (air)
 RI1 = 1.33334+1i*2.5e-2;    % Refractive index of sensor % This needs to be adjusted.
 RI2 = 1.4; % Refractive index of PDMS
@@ -112,20 +117,30 @@ I  = ones(size(xr));                       % ray intensities (start at 1)
 ds      = min(dx,dy)*0.5;                  % step length in meters (CFL-like; 0.3–1.0 px is good)
 nSteps  = 5000;                             % safety cap
 sample_every = 2;                           % draw every N steps to video
-traj_x = cell(1,numel(xr)); traj_y = traj_x;
+nRays = numel(xr);
+ray_x_hist = nan(nSteps+1, nRays);
+ray_y_hist = nan(nSteps+1, nRays);
+ray_x_hist(1,:) = xr;
+ray_y_hist(1,:) = yr;
 %% March
 for s = 1:nSteps
     % Sample n and grad n at current positions (bilinear)
     [j, i] = world2pix(xr, yr);            % (j=cols, i=rows)
-    % guard: rays out of bounds
-    alive = in_bounds(xr, yr);
+    % guard: rays out of bounds (allow a margin so rays can enter domain)
+    margin_y = 0.5*lengthy;               % 12.5 mm for default geometry
+    margin_x = dx;                        % one pixel to tolerate numerical drift
+    inside = in_bounds(xr, yr);
+    pre_or_post = (xr > xmin - margin_x) & (xr < xmax + margin_x) & ...
+                 (yr > ymin - margin_y) & (yr < ymax + margin_y) & ...
+                 (ty > 0);
+    alive = inside | pre_or_post;
     if ~any(alive), break; end
 
     ii = i(alive); jj = j(alive);
-    n_here   = interp2(n_all_s, jj, ii, 'linear', n_air);
-    dndx     = interp2(dn_dx,  jj, ii, 'linear', 0);
-    dndy     = interp2(dn_dy,  jj, ii, 'linear', 0);
-    alpha    = interp2(alpha_all, jj, ii, 'linear', 0);
+    n_here = interp2(n_all_s, jj, ii, 'linear', real(RI0));
+    dndx = interp2(dn_dx,  jj, ii, 'linear', 0);
+    dndy = interp2(dn_dy,  jj, ii, 'linear', 0);
+    alpha_here = interp2(alpha_all, jj, ii, 'linear', 0);
 
     % ODE: d/ds (n * t_hat) = grad n  =>  update t_hat
     % Discretize: n*(t_new - t_old)/ds ≈ grad n  =>  t_new ≈ t_old + (grad n / n)*ds, then renormalize
@@ -139,33 +154,43 @@ for s = 1:nSteps
     yr(alive) = yr(alive) + ty(alive)*ds;
 
     % Absorption
-    I(alive) = I(alive) .* exp(-alpha * ds);
+    I(alive) = I(alive) .* exp(-alpha_here * ds);
 
-    % Record sparse trajectory for plotting
-    for rr = find(alive)
-        traj_x{rr}(end+1) = xr(rr);
-        traj_y{rr}(end+1) = yr(rr);
-    end
+    % Record trajectory history (NaN sentinel keeps paths disjoint)
+    stepIdx = s + 1;
+    ray_x_hist(stepIdx,:) = nan;
+    ray_y_hist(stepIdx,:) = nan;
+    ray_x_hist(stepIdx, alive) = xr(alive);
+    ray_y_hist(stepIdx, alive) = yr(alive);
 
     % Draw + video
     if mod(s, sample_every)==0
         if s==sample_every
-            figure('Color','w'); imshow(nmap_s,[]); hold on; title('Ray paths over refractive index map');
+            baseFig = figure('Color','w');
+            imagesc(x, y, n_all); axis image; set(gca,'ydir','normal'); hold on;
+            title('Ray paths over refractive index map');
         else
-            cla; imshow(nmap_s,[]); hold on;
+            cla; imagesc(x, y, n_all); axis image; set(gca,'ydir','normal'); hold on;
         end
-        % overlay sensor/PDMS outlines
-        visboundaries(bwperim(obj2),'Color','c');    % PDMS edges
-        visboundaries(bwperim(obj1),'Color','y');    % sensor edges
+        % overlay sensor/PDMS outlines when toolbox is available
+        if exist('bwperim','file') == 2 && exist('visboundaries','file') == 2
+            visboundaries(bwperim(obj2),'Color','c');    % PDMS edges
+            visboundaries(bwperim(obj1),'Color','y');    % sensor edges
+        end
 
-        % plot rays (intensity -> alpha)
-        for rr = 1:numel(traj_x)
-            if ~isempty(traj_x{rr})
-                px = (traj_x{rr}-xmin)/dx + 1;
-                py = (ymax - traj_y{rr})/dy + 1;
-                plot(px, py, '-', 'LineWidth', 1.0, 'Color', [1 0 0 max(0.05, min(1,I(rr)))]);
+        % plot rays (line width ~ intensity)
+        for rr = 1:nRays
+            path_x = ray_x_hist(1:stepIdx, rr);
+            path_y = ray_y_hist(1:stepIdx, rr);
+            valid = ~isnan(path_x);
+            if nnz(valid) > 1
+                plot(path_x(valid), path_y(valid), '-', 'LineWidth', max(0.6, 1.8*I(rr)), ...
+                    'Color', [0.85, 0.1, 0.1]);
             end
         end
+        % highlight current ray fronts
+        plot(xr(alive), yr(alive), 'o', 'MarkerSize', 4, 'MarkerEdgeColor', [0.85 0.1 0.1], ...
+            'MarkerFaceColor', [1 1 1]);
         drawnow;
         if movvar==1
             frame = getframe(gcf);
@@ -185,6 +210,33 @@ if movvar==1
     close(writerObj);
 end
 
+function img = readOrGenerateMask(filename)
+%READORGENERATEMASK Read an image if it exists, otherwise create a synthetic mask.
+if exist(filename,'file') == 2
+    img = imread(filename);
+    if size(img,3) == 1
+        img = repmat(img,1,1,3);
+    end
+    return;
+end
 
+warning('File %s not found. Using generated placeholder mask.', filename);
+sz = 512;
+[X,Y] = meshgrid(linspace(-1,1,sz));
+
+switch lower(filename)
+    case 'msource.png'
+        pattern = exp(-((X.^2 + Y.^2) / 0.15^2));
+    case 'sensing_unit_k1d4.png'
+        pattern = double(abs(X) < 0.5 & abs(Y) < 0.3);
+    case 'pdms.png'
+        pattern = double(X.^2 + Y.^2 < 0.75^2);
+    otherwise
+        pattern = exp(-0.5*((X.^2 + Y.^2)/0.5^2));
+end
+
+pattern = uint8(255 * mat2gray(pattern));
+img = repmat(pattern,1,1,3);
+end
 
 
