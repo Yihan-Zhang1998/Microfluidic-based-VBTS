@@ -1,5 +1,7 @@
 %% 2D simulation of ray optics
 % Always utilize SI units
+% In test2, we made sure that the refraction follows Snell's law by
+% defining a function at the end.
 clear;
 clc;
 close all;
