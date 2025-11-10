@@ -1,5 +1,8 @@
 %% 2D simulation of ray optics
 % Always utilize SI units
+% The absorption through the dye solution should be gradual. Instead of
+% using averaged attenuation, we use the local attenuation only for the
+% simulation.
 clear;
 clc;
 close all;
