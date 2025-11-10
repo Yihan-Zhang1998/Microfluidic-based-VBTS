@@ -1,6 +1,9 @@
 %% 2D simulation of ray optics
 % Always utilize SI units
-% In test5, we are going to apply force to deform the PDMS film.
+% In test5, we are going to add stress simulation on the PDMS.
+% Results: the hollow structure of PDMS deformed. However, the fluid inside
+% the chamber did not deform with the PDMS.
+clear;
 clc;
 close all;
 date = datestr(now,'yyyymmdd_HHMMSS');
@@ -29,13 +32,23 @@ coating_cpu = readOrGenerateMask('reflection_coating.png');
 
 msource = toDevice(msource_cpu);
 sensor  = toDevice(sensor_cpu);
-pdms    = toDevice(pdms_cpu);
+
 coating = toDevice(coating_cpu);
+%% Mechanical preload configuration (stress applied before optics)
+pdms_preload.enable     = true;      % toggle to activate PDMS pre-stress deformation
+pdms_preload.direction  = "right-to-left"; % direction of applied traction
+pdms_preload.stress_Pa  = 100e3;      % applied Cauchy stress magnitude [Pa]
+pdms_preload.anchor     = "left";    % edge kept fixed while loading from the opposite side
+pdms_preload.E_Pa       = 750e3;     % Young's modulus of PDMS [Pa]
+pdms_preload.nu         = 0.49;      % Poisson's ratio of PDMS (nearly incompressible)
+pdms_preload.smooth_um  = 30;        % Gaussian smoothing length for deformation field [um]
+pdms_preload.contactRegion = [1.9375e-3 2.4375e-3 -0.0015 0.0015];     % optional [xmin xmax ymin ymax] contact window (meters)
+pdms_preload.contactMask   = [];     % optional logical mask defining the contact patch
 %% Initialize video
 movvar=1;
 fps=30;
 if movvar==1
-    writerObj = VideoWriter(sprintf('%s_test4.mp4',date),'MPEG-4' );
+    writerObj = VideoWriter(sprintf('%s_test5.mp4',date),'MPEG-4' );
     writerObj.FrameRate = fps;
     open(writerObj);
 end
@@ -70,29 +83,75 @@ x = toDevice(x_lin);
 y = toDevice(y_lin);
 %% Source Mask
 source = msource(:,:,1) > 0.5;
-%% Refractive Indices and Objects Definition
+%% Refractive indices, object masks, and PDMS preload deformation
 obj1 = sensor(:,:,2) > 0.5;
-obj2 = pdms(:,:,1) > 0.5;
 obj3 = coating(:,:,3) > 0.5;
+pdms_mask_initial = pdms_cpu(:,:,1) > 0.5;
+
+if pdms_preload.enable
+    preload_opts = pdms_preload;
+    preload_opts.pixel_dx = dx;
+    preload_opts.pixel_dy = dy;
+    preload_opts.domain   = [xmin, xmax, ymin, ymax];
+    [pdms_mask_cpu, pdms_disp] = applyPdmsUniaxialPreload(pdms_mask_initial, X_cpu, Y_cpu, preload_opts);
+    pdms_deformed_cpu = warpFieldWithDisplacement(pdms_cpu, X_cpu, Y_cpu, pdms_disp.ux, pdms_disp.uy, 'linear', 0);
+    fprintf('Applied PDMS preload over %.3f mm^2 contact area (x: %.2f to %.2f mm, y: %.2f to %.2f mm).\n', ...
+        pdms_disp.contactArea_m2 * 1e6, ...
+        pdms_disp.contactBounds(1) * 1e3, pdms_disp.contactBounds(2) * 1e3, ...
+        pdms_disp.contactBounds(3) * 1e3, pdms_disp.contactBounds(4) * 1e3);
+else
+    pdms_mask_cpu = pdms_mask_initial;
+    pdms_deformed_cpu = pdms_cpu;
+    pdms_disp = struct('ux', zeros(size(X_cpu)), ...
+                       'uy', zeros(size(X_cpu)), ...
+                       'mask', logical(pdms_mask_cpu), ...
+                       'magnitude', zeros(size(X_cpu)), ...
+                       'exx', zeros(size(X_cpu)), ...
+                       'eyy', zeros(size(X_cpu)), ...
+                       'exy', zeros(size(X_cpu)), ...
+                       'contactMask', logical(pdms_mask_cpu), ...
+                       'contactArea_m2', sum(pdms_mask_cpu(:)) * dx * dy, ...
+                       'contactBounds', [xmin xmax ymin ymax]);
+end
+
+pdms = toDevice(pdms_deformed_cpu);
+obj2_cpu = logical(pdms_mask_cpu);
+obj2 = toDevice(obj2_cpu);
+obj1_cpu = fromDevice(obj1);
+obj3_cpu = fromDevice(obj3);
+x_plot   = x_lin;
+y_plot   = y_lin;
 RI0 = 1.0003;  % Background refractive index (air)
 RI1 = 1.4158+1i*9.9010e-6;    % Refractive index of sensor % This needs to be adjusted.
 RI2 = 1.4; % Refractive index of PDMS
 RI3 = 0.18104+1i*3.068099; % Refractive index of gold
-RIall = RI0*ones(size(X),'like',X);
-RIall(obj1==1) = RI1;
-RIall(obj2==1) = RI2;
-RIall(obj3==1) = RI3;
-n_all = real(RIall);
-% Absorption
-kappa_all = imag(RIall);
-alpha_all = 4*pi*kappa_all/wavelength;
-% CPU copies for plotting and interface calculations
-n_all_cpu     = fromDevice(n_all);
-alpha_all_cpu = fromDevice(alpha_all);
-obj1_cpu      = fromDevice(obj1);
-obj2_cpu      = fromDevice(obj2);
-x_plot        = fromDevice(x);
-y_plot        = fromDevice(y);
+
+[RIall_cpu, n_all_cpu, alpha_all_cpu] = assembleRefractiveIndexMap(obj1_cpu, obj2_cpu, obj3_cpu, RI0, RI1, RI2, RI3, wavelength);
+RIall = toDevice(RIall_cpu);
+n_all = toDevice(n_all_cpu);
+alpha_all = toDevice(alpha_all_cpu);
+%% Visualize PDMS preloading displacement
+if pdms_preload.enable
+    figure;
+    subplot(1,2,1);
+    imagesc(x_plot*1e3, y_plot*1e3, pdms_disp.magnitude*1e6);
+    axis image;
+    set(gca,'ydir','normal');
+    colorbar;
+    title('PDMS displacement magnitude [\mum]');
+    xlabel('x [mm]');
+    ylabel('y [mm]');
+    hold on;
+    contour(x_plot*1e3, y_plot*1e3, double(pdms_disp.contactMask), [0.5 0.5], 'w--', 'LineWidth', 1.2);
+    hold off;
+    subplot(1,2,2);
+    quiver(X_cpu(pdms_disp.mask)*1e3, Y_cpu(pdms_disp.mask)*1e3, pdms_disp.ux(pdms_disp.mask)*1e6, pdms_disp.uy(pdms_disp.mask)*1e6, 'AutoScale', 'on');
+    axis image;
+    set(gca,'ydir','normal');
+    xlabel('x [mm]');
+    ylabel('y [mm]');
+    title('PDMS displacement vectors [\mum]');
+end
 %% Plot the Geometry
 figure;
 subplot(1,2,1);
@@ -109,14 +168,13 @@ set(gca,'ydir','normal' )
 alpha(1-obj1_cpu*0.2-obj2_cpu*0.1)
 %% Gradients of n(x,y) in physical units
 % gradient() returns per-pixel differences; scale to [1/m]
-[dn_dx_pix, dn_dy_pix] = gradient(n_all);  % note MATLAB: first dim = rows (y), second = cols (x)
-dn_dx = dn_dx_pix / dx;
-dn_dy = dn_dy_pix / dy;
-% Raw (unsmoothed) gradients to estimate interface normals accurately
-dn_dx_cpu      = fromDevice(dn_dx);
-dn_dy_cpu      = fromDevice(dn_dy);
+[dn_dx_pix, dn_dy_pix] = gradient(n_all_cpu);  % note MATLAB: first dim = rows (y), second = cols (x)
+dn_dx_cpu = dn_dx_pix / dx;
+dn_dy_cpu = dn_dy_pix / dy;
+dn_dx = toDevice(dn_dx_cpu);
+dn_dy = toDevice(dn_dy_cpu);
 figure;
-contour(x_plot,y_plot,n_all)
+contour(x_plot,y_plot,n_all_cpu)
 hold on
 quiver(x_plot,y_plot,dn_dx_cpu,dn_dy_cpu)
 hold off
@@ -565,6 +623,66 @@ title(sprintf('Detector plane at x = %.2f mm', 1e3 * x_detector));
 legend('Location','best');
 hold off;
 
+%% Stress-Strain Test (Mechanical Characterization)
+% A complementary virtual tensile test is executed to estimate mechanical
+% resilience of the PDMS/sensor stack under uniaxial loading. The
+% approximation uses a bilinear constitutive model that mimics an initial
+% elastic regime followed by plastic hardening. Results are reported as both
+% stress-strain curves and equivalent force/extension plots for the chosen
+% specimen dimensions.
+material_PDMS = struct( ...
+    'name',            'PDMS', ...
+    'youngsModulus',   1.8e6, ...           % Pa (typical for cured PDMS)
+    'yieldStrain',     0.12, ...            % onset of non-linearity
+    'hardeningModulus',3.0e5, ...           % Pa beyond yield
+    'density',         970);                % kg/m^3
+
+material_sensor = struct( ...
+    'name',            'Sensor substrate', ...
+    'youngsModulus',   70e9, ...            % Pa (e.g., glass)
+    'yieldStrain',     0.004, ...
+    'hardeningModulus',5.0e9, ...
+    'density',         2200);
+
+specimen_geom = struct( ...
+    'length',    15e-3, ...                 % gauge length [m]
+    'width',      3e-3, ...                 % width [m]
+    'thickness',  0.5e-3);                  % thickness [m]
+
+stressStrainCfg = struct( ...
+    'maxStrain',   0.25, ...
+    'nSteps',      250, ...
+    'loadingRate', 1e-3, ...                % m/s (for reference only)
+    'temperature', 298);                    % Kelvin
+
+ss_results_PDMS   = runStressStrainTest(material_PDMS, specimen_geom, stressStrainCfg);
+ss_results_sensor = runStressStrainTest(material_sensor, specimen_geom, stressStrainCfg);
+
+fprintf('\n--- Stress-Strain Summary ---\n');
+displayStressStrainSummary(ss_results_PDMS);
+displayStressStrainSummary(ss_results_sensor);
+
+figure('Color','w');
+subplot(1,2,1);
+plot(ss_results_PDMS.strain, ss_results_PDMS.stress/1e6, 'r-', 'LineWidth', 1.5, 'DisplayName', ss_results_PDMS.material);
+hold on;
+plot(ss_results_sensor.strain, ss_results_sensor.stress/1e6, 'b--', 'LineWidth', 1.5, 'DisplayName', ss_results_sensor.material);
+grid on;
+xlabel('Strain (\epsilon)');
+ylabel('Stress (MPa)');
+title('Stress-Strain Response');
+legend('Location','northwest');
+
+subplot(1,2,2);
+plot(ss_results_PDMS.extension*1e3, ss_results_PDMS.load, 'r-', 'LineWidth', 1.5, 'DisplayName', ss_results_PDMS.material);
+hold on;
+plot(ss_results_sensor.extension*1e3, ss_results_sensor.load, 'b--', 'LineWidth', 1.5, 'DisplayName', ss_results_sensor.material);
+grid on;
+xlabel('Extension (mm)');
+ylabel('Load (N)');
+title('Load-Extension Response');
+legend('Location','northwest');
+
 %% Final spot analysis on an image/sensor line (example at x = xmax - 10 mm)
 x_img = xmax - 10e-3;  % choose your detection plane location
 hit = fromDevice(abs(xr - x_img) < ds);                % crude gating near plane
@@ -664,6 +782,324 @@ pattern = uint8(255 * mat2gray(pattern));
 img = repmat(pattern,1,1,3);
 end
 
+function [RI_map, n_map, alpha_map] = assembleRefractiveIndexMap(obj1, obj2, obj3, RI0, RI1, RI2, RI3, wavelength)
+%ASSEMBLEREFRACTIVEINDEXMAP Combine material masks into refractive index fields.
+
+RI_map = complex(RI0) * ones(size(obj1));
+
+mask1 = logical(obj1);
+mask2 = logical(obj2);
+mask3 = logical(obj3);
+
+RI_map(mask1) = RI1;
+RI_map(mask2) = RI2;
+RI_map(mask3) = RI3;
+
+n_map = real(RI_map);
+kappa_map = imag(RI_map);
+alpha_map = 4 * pi * kappa_map / wavelength;
+
+end
+
+function [mask_deformed, dispField] = applyPdmsUniaxialPreload(mask, X, Y, opts)
+%APPLYPDMSUNIAXIALPRELOAD Apply a uniform uniaxial stress to the PDMS mask.
+
+if ~any(mask(:))
+    dx = fieldWithDefault(opts, 'pixel_dx', 1);
+    dy = fieldWithDefault(opts, 'pixel_dy', dx);
+    emptyField = struct('ux', zeros(size(mask)), ...
+                        'uy', zeros(size(mask)), ...
+                        'mask', mask, ...
+                        'magnitude', zeros(size(mask)), ...
+                        'exx', zeros(size(mask)), ...
+                        'eyy', zeros(size(mask)), ...
+                        'exy', zeros(size(mask)), ...
+                        'contactMask', false(size(mask)), ...
+                        'contactArea_m2', 0, ...
+                        'contactBounds', [NaN NaN NaN NaN]);
+    dispField = emptyField;
+    mask_deformed = mask;
+    return;
+end
+
+dx = fieldWithDefault(opts, 'pixel_dx', 1e-6);
+dy = fieldWithDefault(opts, 'pixel_dy', dx);
+
+contactMask = computeContactMask(mask, X, Y, opts);
+contactMask = contactMask & mask;
+if ~any(contactMask(:))
+    contactMask = mask;
+end
+
+if any(contactMask(:))
+    contactBounds = [min(X(contactMask)), max(X(contactMask)), ...
+                     min(Y(contactMask)), max(Y(contactMask))];
+else
+    contactBounds = [NaN NaN NaN NaN];
+end
+
+sigma = fieldWithDefault(opts, 'stress_Pa', 0);
+direction = lower(fieldWithDefault(opts, 'direction', 'right-to-left'));
+switch direction
+    case {'right-to-left', 'compress-right-to-left', 'rtl'}
+        sigma = -abs(sigma);
+    case {'left-to-right', 'tension', 'ltr'}
+        sigma = abs(sigma);
+    otherwise
+        % Use supplied sign convention
+end
+
+anchor = lower(fieldWithDefault(opts, 'anchor', 'left'));
+switch anchor
+    case 'left'
+        x_anchor = min(X(mask));
+    case 'right'
+        x_anchor = max(X(mask));
+    otherwise
+        x_anchor = min(X(mask));
+end
+
+E  = fieldWithDefault(opts, 'E_Pa', 750e3);
+nu = fieldWithDefault(opts, 'nu', 0.49);
+
+strain_x = sigma / max(E, eps);
+lateral_strain = -nu * strain_x;
+
+ux = zeros(size(mask));
+uy = zeros(size(mask));
+
+ux(mask) = strain_x * (X(mask) - x_anchor);
+
+y_center = mean(Y(mask));
+uy(mask) = lateral_strain * (Y(mask) - y_center);
+
+smooth_um = fieldWithDefault(opts, 'smooth_um', 0);
+if smooth_um > 0
+    sigma_pix = (smooth_um * 1e-6) / max(dx, eps);
+    sigma_pix = max(sigma_pix, 0.5);
+    radius = max(1, ceil(3 * sigma_pix));
+    g = gaussianKernel(radius, sigma_pix);
+else
+    g = [];
+end
+
+if any(mask(:) & ~contactMask(:))
+    influence = zeros(size(mask));
+    influence(contactMask) = 1;
+    if ~isempty(g)
+        influence = conv2(influence, g, 'same');
+    end
+    influence(~mask) = 0;
+    maxInf = max(influence(:));
+    if maxInf > 0
+        influence = influence / maxInf;
+        ux = ux .* influence;
+        uy = uy .* influence;
+    else
+        ux(~contactMask) = 0;
+        uy(~contactMask) = 0;
+    end
+else
+    ux(~contactMask) = 0;
+    uy(~contactMask) = 0;
+end
+
+if ~isempty(g)
+    ux = conv2(ux, g, 'same');
+    uy = conv2(uy, g, 'same');
+end
+
+ux(~mask) = 0;
+uy(~mask) = 0;
+
+X_src = X - ux;
+Y_src = Y - uy;
+
+mask_interp = interp2(X, Y, double(mask), X_src, Y_src, 'linear', 0);
+mask_deformed = mask_interp > 0.5;
+
+ux(~mask_deformed) = 0;
+uy(~mask_deformed) = 0;
+
+exx = zeros(size(mask));
+eyy = zeros(size(mask));
+exy = zeros(size(mask));
+exx(mask_deformed) = strain_x;
+eyy(mask_deformed) = lateral_strain;
+
+contactArea_m2 = sum(contactMask(:)) * dx * dy;
+
+dispField = struct('ux', ux, ...
+                   'uy', uy, ...
+                   'mask', logical(mask_deformed), ...
+                   'magnitude', hypot(ux, uy), ...
+                   'exx', exx, ...
+                   'eyy', eyy, ...
+                   'exy', exy, ...
+                   'contactMask', logical(contactMask), ...
+                   'contactArea_m2', contactArea_m2, ...
+                   'contactBounds', contactBounds);
+
+end
+
+function contactMask = computeContactMask(mask, X, Y, opts)
+%COMPUTECONTACTMASK Resolve the contact area from options or default mask.
+
+contactMask = true(size(mask));
+
+if isfield(opts, 'contactMask') && ~isempty(opts.contactMask)
+    userMask = logical(opts.contactMask);
+    if ~isequal(size(userMask), size(mask))
+        error('contactMask must match the PDMS mask dimensions.');
+    end
+    contactMask = contactMask & userMask;
+end
+
+if isfield(opts, 'contactRegion') && ~isempty(opts.contactRegion)
+    region = opts.contactRegion;
+    if numel(region) == 4 && ~isequal(size(region), [2 2])
+        xmin_c = min(region(1:2));
+        xmax_c = max(region(1:2));
+        ymin_c = min(region(3:4));
+        ymax_c = max(region(3:4));
+        contactMask = contactMask & X >= xmin_c & X <= xmax_c & Y >= ymin_c & Y <= ymax_c;
+    elseif isequal(size(region), [2 2])
+        xmin_c = min(region(1,:));
+        xmax_c = max(region(1,:));
+        ymin_c = min(region(2,:));
+        ymax_c = max(region(2,:));
+        contactMask = contactMask & X >= xmin_c & X <= xmax_c & Y >= ymin_c & Y <= ymax_c;
+    end
+end
+
+contactMask = contactMask & mask;
+end
+
+function g = gaussianKernel(radius, sigma)
+%GAUSSIANKERNEL Create a normalized 2D Gaussian kernel.
+
+sz = 2 * radius + 1;
+[gx, gy] = meshgrid(-radius:radius, -radius:radius);
+g = exp(-(gx.^2 + gy.^2) / (2 * sigma^2));
+g = g / sum(g(:));
+
+end
+
+function field_def = warpFieldWithDisplacement(field, X, Y, ux, uy, method, fillValue)
+%WARPFIELDWITHDISPLACEMENT Warp scalar or RGB fields by a displacement map.
+
+if nargin < 6 || isempty(method)
+    method = 'linear';
+end
+if nargin < 7
+    fillValue = 0;
+end
+
+field_double = double(field);
+X_src = X - ux;
+Y_src = Y - uy;
+
+if ndims(field_double) == 2
+    field_warped = interp2(X, Y, field_double, X_src, Y_src, method, double(fillValue));
+else
+    field_warped = zeros(size(field_double));
+    for ch = 1:size(field_double, 3)
+        field_warped(:,:,ch) = interp2(X, Y, field_double(:,:,ch), X_src, Y_src, method, double(fillValue));
+    end
+end
+
+if isinteger(field)
+    field_warped = min(max(field_warped, double(intmin(class(field)))), double(intmax(class(field))));
+end
+
+field_def = cast(field_warped, 'like', field);
+
+end
+
+function results = runStressStrainTest(material, specimen, cfg)
+%RUNSTRESSSTRAINTEST Generate a uniaxial stress-strain curve using a
+% piecewise bilinear constitutive law. Returns forces, extensions, and
+% energy metrics for the supplied specimen geometry.
+
+arguments
+    material struct
+    specimen struct
+    cfg.maxStrain (1,1) double {mustBePositive} = 0.2
+    cfg.nSteps (1,1) double {mustBeInteger,mustBePositive} = 200
+    cfg.loadingRate (1,1) double {mustBeNonnegative} = 1e-3
+    cfg.temperature (1,1) double {mustBePositive} = 298
+end
+
+strain = linspace(0, cfg.maxStrain, cfg.nSteps).';
+E = fieldWithDefault(material, 'youngsModulus', 1e6);
+yieldStrain = fieldWithDefault(material, 'yieldStrain', 0.1);
+hardening = fieldWithDefault(material, 'hardeningModulus', 1e5);
+
+stress = bilinearStressStrain(strain, E, yieldStrain, hardening);
+area = specimen.width * specimen.thickness;
+extension = strain * specimen.length;
+load = stress * area;
+energyDensity = cumtrapz(strain, stress);
+strainEnergy = energyDensity * area * specimen.length;
+
+results = struct();
+results.material     = fieldWithDefault(material,'name','Material');
+results.strain       = strain;
+results.stress       = stress;
+results.load         = load;
+results.extension    = extension;
+results.youngsModulus = E;
+results.yieldStrain  = yieldStrain;
+results.hardeningModulus = hardening;
+results.maxLoad      = max(load);
+results.maxStress    = max(stress);
+results.maxStrain    = cfg.maxStrain;
+results.energyDensity = energyDensity;
+results.totalStrainEnergy = strainEnergy(end);
+results.specimen     = specimen;
+results.cfg          = cfg;
+results.density      = fieldWithDefault(material,'density',NaN);
+
+end
+
+function stress = bilinearStressStrain(strain, E, yieldStrain, hardening)
+%BILINEARSTRESSSTRAIN Simple bilinear material model.
+
+strain = max(strain, 0);
+yieldStrain = max(yieldStrain, eps);
+hardening = max(hardening, 0);
+
+elasticMask = strain <= yieldStrain;
+plasticMask = ~elasticMask;
+stress = zeros(size(strain));
+
+stress(elasticMask) = E .* strain(elasticMask);
+if any(plasticMask)
+    stress(plasticMask) = E * yieldStrain + hardening .* (strain(plasticMask) - yieldStrain);
+end
+
+end
+
+function val = fieldWithDefault(s, name, default)
+%FIELDWITHDEFAULT Return struct field if present, otherwise default.
+if isstruct(s) && isfield(s, name)
+    val = s.(name);
+else
+    val = default;
+end
+end
+
+function displayStressStrainSummary(results)
+%DISPLAYSTRESSSTRAINSUMMARY Command-window summary helper.
+fprintf('Material: %s\n', results.material);
+fprintf('  Max strain: %.2f %%\n', results.maxStrain * 100);
+fprintf('  Max stress: %.2f MPa\n', results.maxStress / 1e6);
+fprintf('  Max load:   %.2f N\n', results.maxLoad);
+fprintf('  Strain energy: %.3f mJ\n', results.totalStrainEnergy * 1e3);
+fprintf('  Young''s modulus (input): %.2f MPa\n', results.youngsModulus / 1e6);
+fprintf('\n');
+end
+
 function frac = estimateInterfaceFraction(x0, y0, x1, y1, obj1, obj2, xmin, ymin, dx, dy, ymax)
 %ESTIMATEINTERFACEFRACTION Approximate the fraction of a step spent in the origin medium.
 %   Uses mask transitions to detect where the interface lies along the segment
@@ -698,4 +1134,3 @@ col = (xw - xmin)/dx + 1;
 row = (ymax - yw)/dy + 1;
 val = interp2(double(mask), col, row, 'linear', 0);
 end
-
