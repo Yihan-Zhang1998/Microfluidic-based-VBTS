@@ -1,5 +1,7 @@
 %% 2D simulation of ray optics
 % Always utilize SI units
+% This is the first trial for ray optics simulation. The geometry was
+% imported from PNG images.
 clear;
 clc;
 close all;
