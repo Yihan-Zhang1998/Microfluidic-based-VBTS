@@ -1,8 +1,7 @@
 %% 2D simulation of ray optics
 % Always utilize SI units
-% The absorption through the dye solution should be gradual. Instead of
-% using averaged attenuation, we use the local attenuation only for the
-% simulation.
+% In test2, we made sure that the refraction follows Snell's law by
+% defining a function at the end.
 clear;
 clc;
 close all;
@@ -36,7 +35,7 @@ pdms    = toDevice(pdms_cpu);
 movvar=1;
 fps=30;
 if movvar==1
-    writerObj = VideoWriter(sprintf('%s_test3.mp4',date),'MPEG-4' );
+    writerObj = VideoWriter(sprintf('%s_test2.mp4',date),'MPEG-4' );
     writerObj.FrameRate = fps;
     open(writerObj);
 end
@@ -75,7 +74,7 @@ source = msource(:,:,1) > 0.5;
 obj1 = sensor(:,:,2) > 0.5;
 obj2 = pdms(:,:,1) > 0.5;
 RI0 = 1.0003;  % Background refractive index (air)
-RI1 = 1.33334+1i*2.5e-5;    % Refractive index of sensor % This needs to be adjusted.
+RI1 = 1.33334+1i*2.5e-2;    % Refractive index of sensor % This needs to be adjusted.
 RI2 = 1.4; % Refractive index of PDMS
 RIall = RI0*ones(size(X),'like',X);
 RIall(obj1==1) = RI1;
@@ -120,9 +119,8 @@ quiver(x_plot,y_plot,dn_dx_cpu,dn_dy_cpu)
 hold off
 %% Ray Definition
 aperture = 5e-3;
-% y0 = 0;
 y0 = linspace(-aperture/2, aperture/2, 9);
-x_start = xmin + 0.4 * lengthx;                 % small offset from the left boundary
+x_start = xmin + 5*dx;                 % small offset from the left boundary
 r0 = [repmat(x_start, 1, numel(y0)); y0];
 k0 = repmat([1; 0], 1, numel(y0));
 % Trace
@@ -152,7 +150,7 @@ for idx = 1:numel(xr)
 end
 %% March settings
 ds      = min(dx,dy)*0.5;                  % step length in meters (CFL-like; 0.3–1.0 px is good)
-nSteps  = 230;                             % safety cap
+nSteps  = 5000;                             % safety cap
 sample_every = 2;                           % draw every N steps to video
 
 %% March
@@ -172,11 +170,6 @@ for s = 1:nSteps
     if ~any(aliveHost), break; end
 
     active_idx = find(alive);
-    atten_cross_positions = [];
-    atten_cross_values    = [];
-    ds_old_list           = [];
-    ds_new_list           = [];
-    alpha_prev_list       = [];
     ii = i(active_idx); jj = j(active_idx);
     n_here = interp2(n_all, jj, ii, 'linear', n_background);
     dndx = interp2(dn_dx,  jj, ii, 'linear', 0);
@@ -237,37 +230,13 @@ for s = 1:nSteps
             ty(rr) = k_out_gpu(2);
             prev_x_val = prev_x(cross_idx(idxCross));
             prev_y_val = prev_y(cross_idx(idxCross));
-            prev_x_cpu = fromDevice(prev_x_val);
-            prev_y_cpu = fromDevice(prev_y_val);
             xr(rr) = prev_x_val + k_out_gpu(1)*ds;
             yr(rr) = prev_y_val + k_out_gpu(2)*ds;
-            xr_cpu = fromDevice(xr(rr));
-            yr_cpu = fromDevice(yr(rr));
             if tir
                 n_next_cross(idxCross) = n1;
                 alpha_next(cross_idx(idxCross)) = alpha_here(cross_idx(idxCross));
             end
             tir_flags(idxCross) = tir;
-
-            % Estimate partial path before hitting the interface for absorption logging
-            alpha_prev_val = fromDevice(alpha_here(cross_idx(idxCross)));
-            I_before = fromDevice(I(rr));
-            frac_old = estimateInterfaceFraction(prev_x_cpu, prev_y_cpu, xr_cpu, yr_cpu, ...
-                obj1_cpu, obj2_cpu, xmin, ymin, dx, dy, ymax);
-            ds_old = frac_old * ds;
-            ds_new = (1 - frac_old) * ds;
-            if ds_old > 0
-                k_in_unit = k_in / norm(k_in);
-                interface_pt = [prev_x_cpu; prev_y_cpu] + k_in_unit * ds_old;
-                I_at_interface = I_before * exp(-alpha_prev_val * ds_old);
-                traj_x{rr}(end+1) = interface_pt(1);
-                traj_y{rr}(end+1) = interface_pt(2);
-                traj_I{rr}(end+1) = I_at_interface;
-            end
-            atten_cross_positions(end+1) = cross_idx(idxCross);
-            ds_old_list(end+1)           = ds_old;
-            ds_new_list(end+1)           = ds_new;
-            alpha_prev_list(end+1)       = alpha_prev_val;
         end
         transmit_mask = ~tir_flags & valid;
         if any(transmit_mask)
@@ -282,27 +251,14 @@ for s = 1:nSteps
             alpha_next(idx_transmit) = toDevice(alpha_next_vals);
         end
         n_next(cross_idx) = toDevice(n_next_cross);
-        if ~isempty(atten_cross_positions)
-            alpha_prev_vals = alpha_prev_list(:);
-            ds_old_vals = ds_old_list(:);
-            ds_new_vals = ds_new_list(:);
-            alpha_next_vals = fromDevice(alpha_next(atten_cross_positions));
-            atten_cross_values = exp(-alpha_prev_vals .* ds_old_vals - alpha_next_vals(:) .* ds_new_vals);
-        end
     end
 
     n_medium(active_idx) = n_next;
 
-    % Absorption with interface-aware path lengths
-    alpha_here_cpu = fromDevice(alpha_here);
-    alpha_here_cpu = alpha_here_cpu(:);
-    atten_cpu = exp(-alpha_here_cpu * ds);
-    for idxCross = 1:numel(atten_cross_positions)
-        pos = atten_cross_positions(idxCross);
-        atten_cpu(pos) = atten_cross_values(idxCross);
-    end
-    atten_gpu = toDevice(atten_cpu);
-    I(active_idx) = I(active_idx) .* atten_gpu';
+    % Absorption (use average attenuation across the step)
+    alpha_step = 0.5*(alpha_here + alpha_next);
+    alpha_step = alpha_step(:).';
+    I(active_idx) = I(active_idx) .* exp(-alpha_step * ds);
 
     % Record sparse trajectory for plotting
     for rr = active_idx
@@ -334,10 +290,7 @@ for s = 1:nSteps
             ii = traj_I{rr};
             if numel(xx) > 1
                 for seg = 1:numel(xx)-1
-                    seg_intensity = max(0, min(1, mean(ii(seg:seg+1))));
-                    if seg==numel(xx)-1
-                        fprintf('The segment intensity is %.5f \n',seg_intensity)
-                    end
+                    seg_intensity = max(0.05, min(1, mean(ii(seg:seg+1))));
                     line(xx(seg:seg+1), yy(seg:seg+1), 'LineWidth', 1.0, ...
                         'Color', seg_intensity*[1 0 0]);
                 end
@@ -421,38 +374,4 @@ pattern = uint8(255 * mat2gray(pattern));
 img = repmat(pattern,1,1,3);
 end
 
-function frac = estimateInterfaceFraction(x0, y0, x1, y1, obj1, obj2, xmin, ymin, dx, dy, ymax)
-%ESTIMATEINTERFACEFRACTION Approximate the fraction of a step spent in the origin medium.
-%   Uses mask transitions to detect where the interface lies along the segment
-%   connecting (x0,y0) to (x1,y1). Returns a value in [0,1].
-
-masks = {obj1, obj2};
-start_vals = zeros(1, numel(masks));
-end_vals   = zeros(1, numel(masks));
-delta_vals = zeros(1, numel(masks));
-for k = 1:numel(masks)
-    start_vals(k) = sampleMask(masks{k}, x0, y0, xmin, ymin, dx, dy, ymax);
-    end_vals(k)   = sampleMask(masks{k}, x1, y1, xmin, ymin, dx, dy, ymax);
-    delta_vals(k) = end_vals(k) - start_vals(k);
-end
-
-[~, idx] = max(abs(delta_vals));
-delta = delta_vals(idx);
-start_val = start_vals(idx);
-
-if abs(delta) < 1e-6
-    frac = 0.5;
-else
-    frac = (0.5 - start_val) / delta;
-    frac = min(max(frac, 0), 1);
-end
-
-end
-
-function val = sampleMask(mask, xw, yw, xmin, ymin, dx, dy, ymax)
-%SAMPLEMASK Bilinear sample of a binary mask at world coordinates.
-col = (xw - xmin)/dx + 1;
-row = (ymax - yw)/dy + 1;
-val = interp2(double(mask), col, row, 'linear', 0);
-end
 
