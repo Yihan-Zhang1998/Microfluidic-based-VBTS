@@ -77,7 +77,7 @@ obj1 = sensor(:,:,2) > 0.5;
 obj2 = pdms(:,:,1) > 0.5;
 obj3 = coating(:,:,3) > 0.5;
 RI0 = 1.0003;  % Background refractive index (air)
-RI1 = 1.33334+1i*2.5e-5;    % Refractive index of sensor % This needs to be adjusted.
+RI1 = 1.4158+1i*9.9010e-6;    % Refractive index of sensor % This needs to be adjusted.
 RI2 = 1.4; % Refractive index of PDMS
 RI3 = 0.18104+1i*3.068099; % Refractive index of gold
 RIall = RI0*ones(size(X),'like',X);
@@ -90,6 +90,7 @@ kappa_all = imag(RIall);
 alpha_all = 4*pi*kappa_all/wavelength;
 % CPU copies for plotting and interface calculations
 n_all_cpu     = fromDevice(n_all);
+kappa_all_cpu = fromDevice(kappa_all);
 alpha_all_cpu = fromDevice(alpha_all);
 obj1_cpu      = fromDevice(obj1);
 obj2_cpu      = fromDevice(obj2);
@@ -102,13 +103,13 @@ imagesc(x_plot,y_plot,n_all_cpu);
 axis image
 set(gca,'ydir','normal' )
 % colormap(gca,emkc)
-alpha(1-obj1_cpu*0.2-obj2_cpu*0.1)
+% alpha(1-obj1_cpu*0.2-obj2_cpu*0.1)
 subplot(1,2,2);
-imagesc(x_plot,y_plot,alpha_all_cpu);
+imagesc(x_plot,y_plot,kappa_all_cpu);
 axis image
 set(gca,'ydir','normal' )
 % colormap(gca,emkc)
-alpha(1-obj1_cpu*0.2-obj2_cpu*0.1)
+% alpha(1-obj1_cpu*0.2-obj2_cpu*0.1)
 %% Gradients of n(x,y) in physical units
 % gradient() returns per-pixel differences; scale to [1/m]
 [dn_dx_pix, dn_dy_pix] = gradient(n_all);  % note MATLAB: first dim = rows (y), second = cols (x)
